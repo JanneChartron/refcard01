@@ -1,0 +1,84 @@
+name: CI/CD refcard01
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: refcard01
+
+jobs:
+  build-test-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write   # fuer Push nach ghcr.io
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # ---- BUILD ----
+      - name: Build image (lokal laden fuer Test)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: ${{ env.IMAGE_NAME }}:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ---- TEST: Container starten und Website pruefen ----
+      - name: Smoke-Test Container
+        run: |
+          docker run -d --name app -p 8080:8080 ${{ env.IMAGE_NAME }}:test
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8080/ > page.html; then break; fi
+            sleep 2
+          done
+          grep -q "IP Address (Server)" page.html
+          echo "Smoke-Test erfolgreich"
+          docker rm -f app
+
+      # ---- DEPLOY (nur bei Push auf main) ----
+      - name: Login Docker Hub
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Login GitHub Container Registry (ghcr.io)
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image-Namen bestimmen
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}
+            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest
+            type=sha
+
+      - name: Push nach Docker Hub und ghcr.io
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
